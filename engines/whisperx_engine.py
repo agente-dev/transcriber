@@ -37,6 +37,10 @@ from engines.base import (
 from config.models import ModelManager
 from diarization.pipeline import DiarizationPipeline
 from alignment.word_aligner import WordAligner, AlignmentConfig
+from utils.progress import (
+    OperationProgress, progress_context, create_download_progress_callback,
+    estimate_processing_time, format_duration, should_show_progress
+)
 
 
 class WhisperXEngine(TranscriptionEngine):
@@ -55,7 +59,7 @@ class WhisperXEngine(TranscriptionEngine):
         
         # Extract configuration
         self.whisperx_config = getattr(config, 'whisperx', type('obj', (object,), {
-            'model': 'large-v2',
+            'model': 'large-v3',
             'device': 'auto',
             'compute_type': 'float16',
             'batch_size': 16
@@ -120,7 +124,7 @@ class WhisperXEngine(TranscriptionEngine):
             return
         
         model_name = self.whisperx_config.model
-        print(f"Loading WhisperX model: {model_name}")
+        disable_progress = not should_show_progress()
         
         # Validate model selection
         validation = self.model_manager.validate_model_selection(model_name, self.device)
@@ -131,12 +135,13 @@ class WhisperXEngine(TranscriptionEngine):
             print(f"Warning: {warning}")
         
         try:
-            self.whisper_model = whisperx.load_model(
-                model_name,
-                device=self.device,
-                compute_type=self.compute_type
-            )
-            print(f"✓ Model loaded successfully")
+            with progress_context(f"Loading WhisperX model ({model_name})", disable=disable_progress) as spinner:
+                self.whisper_model = whisperx.load_model(
+                    model_name,
+                    device=self.device,
+                    compute_type=self.compute_type
+                )
+                spinner.finish(f"Model {model_name} loaded successfully")
             
         except Exception as e:
             if "out of memory" in str(e).lower():
@@ -145,11 +150,12 @@ class WhisperXEngine(TranscriptionEngine):
                 if self.device == 'cuda':
                     print("Falling back to CPU processing")
                     self.device = 'cpu'
-                    self.whisper_model = whisperx.load_model(
-                        model_name,
-                        device=self.device,
-                        compute_type='float32'
-                    )
+                    with progress_context("Loading model on CPU", disable=disable_progress):
+                        self.whisper_model = whisperx.load_model(
+                            model_name,
+                            device=self.device,
+                            compute_type='float32'
+                        )
                 else:
                     raise
             else:
@@ -163,28 +169,29 @@ class WhisperXEngine(TranscriptionEngine):
         if self.word_aligner is not None:
             return self.word_aligner
         
+        disable_progress = not should_show_progress()
+        
         try:
-            print("Loading enhanced word aligner...")
-            
-            # Create alignment configuration from settings
-            alignment_config = AlignmentConfig(
-                enabled=self.alignment_config.enabled,
-                return_char_alignments=getattr(self.alignment_config, 'return_char_alignments', False),
-                interpolate_method=getattr(self.alignment_config, 'interpolate_method', 'nearest'),
-                device=self.device,
-                extend_duration=2.0,
-                rtl_support=True,
-                min_word_confidence=getattr(self.alignment_config, 'min_word_confidence', 0.1),
-                alignment_window=0.02
-            )
-            
-            self.word_aligner = WordAligner(
-                config=alignment_config,
-                cache_dir=self.model_manager.cache_dir / "alignment"
-            )
-            
-            print("✓ Enhanced word aligner loaded")
-            return self.word_aligner
+            with progress_context("Loading enhanced word aligner", disable=disable_progress) as spinner:
+                # Create alignment configuration from settings
+                alignment_config = AlignmentConfig(
+                    enabled=self.alignment_config.enabled,
+                    return_char_alignments=getattr(self.alignment_config, 'return_char_alignments', False),
+                    interpolate_method=getattr(self.alignment_config, 'interpolate_method', 'nearest'),
+                    device=self.device,
+                    extend_duration=2.0,
+                    rtl_support=True,
+                    min_word_confidence=getattr(self.alignment_config, 'min_word_confidence', 0.1),
+                    alignment_window=0.02
+                )
+                
+                self.word_aligner = WordAligner(
+                    config=alignment_config,
+                    cache_dir=self.model_manager.cache_dir / "alignment"
+                )
+                
+                spinner.finish("Enhanced word aligner loaded")
+                return self.word_aligner
             
         except Exception as e:
             print(f"Warning: Could not load enhanced word aligner: {e}")
@@ -221,23 +228,24 @@ class WhisperXEngine(TranscriptionEngine):
         if self.enhanced_diarization_pipeline is not None:
             return self.enhanced_diarization_pipeline
         
+        disable_progress = not should_show_progress()
+        
         try:
-            print("Loading enhanced speaker diarization pipeline...")
-            
-            # Create configuration for diarization pipeline
-            diarization_config = {
-                'cache_dir': str(self.model_manager.cache_dir),
-                'device': self.device
-            }
-            
-            self.enhanced_diarization_pipeline = DiarizationPipeline(
-                config=diarization_config,
-                hf_token=self.model_manager.hf_token,
-                device=self.device
-            )
-            
-            print("✓ Enhanced diarization pipeline loaded")
-            return self.enhanced_diarization_pipeline
+            with progress_context("Loading enhanced speaker diarization pipeline", disable=disable_progress) as spinner:
+                # Create configuration for diarization pipeline
+                diarization_config = {
+                    'cache_dir': str(self.model_manager.cache_dir),
+                    'device': self.device
+                }
+                
+                self.enhanced_diarization_pipeline = DiarizationPipeline(
+                    config=diarization_config,
+                    hf_token=self.model_manager.hf_token,
+                    device=self.device
+                )
+                
+                spinner.finish("Enhanced diarization pipeline loaded")
+                return self.enhanced_diarization_pipeline
             
         except Exception as e:
             print(f"Warning: Could not load enhanced diarization pipeline: {e}")
@@ -245,12 +253,13 @@ class WhisperXEngine(TranscriptionEngine):
             
             # Fallback to basic WhisperX diarization
             try:
-                self.diarization_pipeline = whisperx.DiarizationPipeline(
-                    use_auth_token=self.model_manager.hf_token,
-                    device=self.device
-                )
-                print("✓ Basic diarization pipeline loaded")
-                return self.diarization_pipeline
+                with progress_context("Loading basic diarization pipeline", disable=disable_progress):
+                    self.diarization_pipeline = whisperx.DiarizationPipeline(
+                        use_auth_token=self.model_manager.hf_token,
+                        device=self.device
+                    )
+                    print("✓ Basic diarization pipeline loaded")
+                    return self.diarization_pipeline
             except Exception as fallback_error:
                 print(f"Warning: Fallback diarization also failed: {fallback_error}")
                 print("Speaker diarization will not be available")
@@ -263,114 +272,139 @@ class WhisperXEngine(TranscriptionEngine):
         if not validation.is_valid:
             raise ValueError(validation.error_message)
         
-        print(f"Transcribing {audio_path} using WhisperX...")
+        disable_progress = not should_show_progress()
+        file_size_mb = validation.file_size_mb if validation.file_size_mb else 0.0
+        estimated_time = estimate_processing_time(file_size_mb, self.device)
+        
+        # Define processing stages
+        stages = ["Model Loading", "Audio Loading", "Transcription"]
+        if self.alignment_config.enabled:
+            stages.append("Word Alignment")
+        if self.diarization_config.enabled:
+            stages.append("Speaker Diarization")
+        stages.append("Finalizing")
+        
+        progress = OperationProgress(stages, audio_path, disable=disable_progress)
+        
+        if not disable_progress:
+            print(f"📊 Estimated processing time: {format_duration(estimated_time)}")
         
         try:
             # Load models
+            progress.start_stage("Model Loading")
             self._load_whisper_model()
+            progress.finish_stage("Model Loading")
             
             # Load and preprocess audio
-            print("Loading audio...")
-            audio = whisperx.load_audio(audio_path)
+            progress.start_stage("Audio Loading")
+            with progress_context("Loading audio file", disable=disable_progress):
+                audio = whisperx.load_audio(audio_path)
+            progress.finish_stage("Audio Loading")
             
             # Transcribe
-            print("Transcribing...")
-            result = self.whisper_model.transcribe(
-                audio, 
-                batch_size=self.whisperx_config.batch_size,
-                language=getattr(self.config, 'language', None)
-            )
-            
-            # Get detected language
-            language = result.get('language', getattr(self.config, 'language', 'he'))
+            progress.start_stage("Transcription")
+            with progress_context("Transcribing audio", disable=disable_progress) as spinner:
+                result = self.whisper_model.transcribe(
+                    audio, 
+                    batch_size=self.whisperx_config.batch_size,
+                    language=getattr(self.config, 'language', None)
+                )
+                language = result.get('language', getattr(self.config, 'language', 'he'))
+                spinner.finish(f"Transcription complete - detected language: {language}")
+            progress.finish_stage("Transcription")
             
             # Word-level alignment
             if self.alignment_config.enabled:
+                progress.start_stage("Word Alignment")
                 word_aligner = self._load_word_aligner()
                 if word_aligner is not None:
-                    print("Aligning words with enhanced aligner...")
-                    
-                    # Use enhanced word aligner
-                    result["segments"] = word_aligner.align_segments(
-                        result["segments"],
-                        audio,
-                        language
-                    )
-                    
-                    # Validate alignment quality
-                    validation = word_aligner.validate_alignment_quality(
-                        result["segments"],
-                        len(audio) / 16000  # Approximate duration
-                    )
-                    
-                    if validation['warnings']:
-                        for warning in validation['warnings']:
-                            print(f"Alignment warning: {warning}")
-                    
-                    print(f"✓ Word alignment completed ({validation['coverage_percentage']:.1f}% coverage)")
+                    with progress_context("Aligning words with enhanced aligner", disable=disable_progress) as spinner:
+                        # Use enhanced word aligner
+                        result["segments"] = word_aligner.align_segments(
+                            result["segments"],
+                            audio,
+                            language
+                        )
+                        
+                        # Validate alignment quality
+                        validation = word_aligner.validate_alignment_quality(
+                            result["segments"],
+                            len(audio) / 16000  # Approximate duration
+                        )
+                        
+                        if validation['warnings'] and not disable_progress:
+                            for warning in validation['warnings']:
+                                print(f"Alignment warning: {warning}")
+                        
+                        spinner.finish(f"Word alignment completed ({validation['coverage_percentage']:.1f}% coverage)")
                     
                 else:
                     # Fallback to basic alignment
                     alignment_model = self._load_alignment_model(language)
                     if alignment_model is not None:
-                        print("Using basic word alignment...")
-                        result = whisperx.align(
-                            result["segments"], 
-                            self.alignment_model, 
-                            self.alignment_metadata, 
-                            audio, 
-                            self.device, 
-                            return_char_alignments=False
-                        )
+                        with progress_context("Using basic word alignment", disable=disable_progress):
+                            result = whisperx.align(
+                                result["segments"], 
+                                self.alignment_model, 
+                                self.alignment_metadata, 
+                                audio, 
+                                self.device, 
+                                return_char_alignments=False
+                            )
+                progress.finish_stage("Word Alignment")
             
             # Speaker diarization
             speakers_list = None
             if self.diarization_config.enabled:
+                progress.start_stage("Speaker Diarization")
                 diarization_pipeline = self._load_diarization_pipeline()
                 if diarization_pipeline is not None:
                     
                     # Use enhanced diarization pipeline if available
                     if isinstance(diarization_pipeline, DiarizationPipeline):
-                        print("Performing enhanced speaker diarization...")
-                        
-                        # Run enhanced diarization
-                        diarization_result = diarization_pipeline.diarize_audio(
-                            audio_path,
-                            min_speakers=self.diarization_config.min_speakers,
-                            max_speakers=self.diarization_config.max_speakers
-                        )
-                        
-                        # Apply to segments
-                        result["segments"] = diarization_pipeline.apply_diarization_to_segments(
-                            diarization_result, result["segments"]
-                        )
+                        with progress_context("Performing enhanced speaker diarization", disable=disable_progress) as spinner:
+                            # Run enhanced diarization
+                            diarization_result = diarization_pipeline.diarize_audio(
+                                audio_path,
+                                min_speakers=self.diarization_config.min_speakers,
+                                max_speakers=self.diarization_config.max_speakers
+                            )
+                            
+                            # Apply to segments
+                            result["segments"] = diarization_pipeline.apply_diarization_to_segments(
+                                diarization_result, result["segments"]
+                            )
+                            
+                            speaker_count = len(set(seg.get('speaker') for seg in result["segments"] if seg.get('speaker')))
+                            spinner.finish(f"Diarization complete - detected {speaker_count} speakers")
                         
                         # Apply to words if available using enhanced word aligner
                         if self.word_aligner is not None:
-                            print("Mapping words to speakers with enhanced alignment...")
-                            result["segments"] = self.word_aligner.align_words_to_speakers(
-                                result["segments"], 
-                                diarization_result
-                            )
-                            
-                            # Update global words list
-                            all_words = []
-                            for segment in result["segments"]:
-                                if 'words' in segment:
-                                    all_words.extend(segment['words'])
-                            result['words'] = all_words
-                            
+                            with progress_context("Mapping words to speakers", disable=disable_progress):
+                                result["segments"] = self.word_aligner.align_words_to_speakers(
+                                    result["segments"], 
+                                    diarization_result
+                                )
+                                
+                                # Update global words list
+                                all_words = []
+                                for segment in result["segments"]:
+                                    if 'words' in segment:
+                                        all_words.extend(segment['words'])
+                                result['words'] = all_words
+                                
                         elif 'words' in result and result['words']:
                             # Fallback to basic word-level diarization
-                            all_words = []
-                            for segment in result["segments"]:
-                                if 'words' in segment:
-                                    segment_words = diarization_pipeline.apply_word_level_diarization(
-                                        diarization_result, segment['words']
-                                    )
-                                    segment['words'] = segment_words
-                                    all_words.extend(segment_words)
-                            result['words'] = all_words
+                            with progress_context("Applying word-level diarization", disable=disable_progress):
+                                all_words = []
+                                for segment in result["segments"]:
+                                    if 'words' in segment:
+                                        segment_words = diarization_pipeline.apply_word_level_diarization(
+                                            diarization_result, segment['words']
+                                        )
+                                        segment['words'] = segment_words
+                                        all_words.extend(segment_words)
+                                result['words'] = all_words
                         
                         # Get enhanced speaker statistics
                         total_duration = max([seg['end'] for seg in result["segments"]]) if result["segments"] else 0.0
@@ -386,29 +420,37 @@ class WhisperXEngine(TranscriptionEngine):
                             max_speakers=self.diarization_config.max_speakers
                         )
                         
-                        for warning in validation.get('warnings', []):
-                            print(f"Diarization warning: {warning}")
+                        if not disable_progress:
+                            for warning in validation.get('warnings', []):
+                                print(f"Diarization warning: {warning}")
                     
                     else:
                         # Fallback to basic WhisperX diarization
-                        print("Using basic WhisperX diarization...")
-                        
-                        diarize_segments = diarization_pipeline(
-                            audio,
-                            min_speakers=self.diarization_config.min_speakers,
-                            max_speakers=self.diarization_config.max_speakers
-                        )
-                        
-                        # Apply speaker labels to segments
-                        result = whisperx.assign_word_speakers(diarize_segments, result)
-                        
-                        # Extract speaker information
-                        speakers_list = self._extract_speaker_info(result["segments"])
+                        with progress_context("Using basic WhisperX diarization", disable=disable_progress):
+                            diarize_segments = diarization_pipeline(
+                                audio,
+                                min_speakers=self.diarization_config.min_speakers,
+                                max_speakers=self.diarization_config.max_speakers
+                            )
+                            
+                            # Apply speaker labels to segments
+                            result = whisperx.assign_word_speakers(diarize_segments, result)
+                            
+                            # Extract speaker information
+                            speakers_list = self._extract_speaker_info(result["segments"])
+                
+                progress.finish_stage("Speaker Diarization")
             
-            # Convert to our format
-            return self._convert_result(result, language, Path(audio_path).name, speakers_list)
+            # Finalize
+            progress.start_stage("Finalizing")
+            final_result = self._convert_result(result, language, Path(audio_path).name, speakers_list)
+            progress.finish_stage("Finalizing")
+            
+            progress.finish()
+            return final_result
             
         except Exception as e:
+            progress.error("Transcription", str(e))
             raise RuntimeError(f"WhisperX transcription failed: {e}")
     
     def _extract_speaker_info(self, segments: List[Dict]) -> List[Speaker]:

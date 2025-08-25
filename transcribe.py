@@ -12,8 +12,8 @@ from cli import create_argument_parser, TranscriptionRouter
 from cli.parser import args_to_config
 from config import load_config
 from config.settings import create_default_config_file
-from formatters import MarkdownFormatter, JSONFormatter
-from utils.progress import ProgressBar
+from formatters import MarkdownFormatter, JSONFormatter, SRTFormatter, VTTFormatter, AdvancedSRTFormatter
+from utils.progress import ProgressBar, set_global_quiet
 
 load_dotenv()
 
@@ -80,30 +80,47 @@ def get_output_path(input_path: str, output_format: str, custom_path: str = None
 
 
 def format_and_save_result(result, filename: str, output_path: Path, output_format: str, 
-                          include_timestamps: bool = False, include_confidence: bool = False):
+                          include_timestamps: bool = False, include_confidence: bool = False,
+                          include_word_timestamps: bool = False, include_speaker_stats: bool = True):
     """Format and save transcription result."""
     
     if output_format == 'markdown':
-        formatter = MarkdownFormatter(include_timestamps, include_confidence)
+        formatter = MarkdownFormatter(
+            include_timestamps=include_timestamps, 
+            include_confidence=include_confidence,
+            include_word_timestamps=include_word_timestamps,
+            include_speaker_stats=include_speaker_stats
+        )
         content = formatter.format(result, filename)
         
     elif output_format == 'json':
-        formatter = JSONFormatter(pretty=True, include_words=True)
+        formatter = JSONFormatter(
+            pretty=True, 
+            include_words=True,
+            include_analysis=True,
+            include_statistics=include_speaker_stats
+        )
         content = formatter.format(result, filename)
         
     elif output_format == 'srt':
-        # TODO: Implement SRT formatter
-        print("SRT format not yet implemented, using markdown")
-        formatter = MarkdownFormatter(include_timestamps, include_confidence)
+        # Use enhanced SRT formatter with speaker support
+        has_speakers = result.speakers and len(result.speakers) > 1
+        if has_speakers:
+            formatter = AdvancedSRTFormatter(
+                include_speakers=True,
+                use_speaker_colors=True,
+                max_chars_per_line=42
+            )
+        else:
+            formatter = SRTFormatter(include_speakers=False)
         content = formatter.format(result, filename)
-        output_path = output_path.with_suffix('.md')
         
     elif output_format == 'vtt':
-        # TODO: Implement VTT formatter  
-        print("VTT format not yet implemented, using markdown")
-        formatter = MarkdownFormatter(include_timestamps, include_confidence)
+        formatter = VTTFormatter(
+            include_speakers=result.speakers and len(result.speakers) > 1,
+            max_chars_per_line=42
+        )
         content = formatter.format(result, filename)
-        output_path = output_path.with_suffix('.md')
         
     else:
         raise ValueError(f"Unsupported output format: {output_format}")
@@ -113,6 +130,14 @@ def format_and_save_result(result, filename: str, output_path: Path, output_form
         f.write(content)
     
     print(f"✓ Transcription saved to: {output_path}")
+    
+    # Show format-specific information
+    if output_format in ['srt', 'vtt'] and result.speakers and len(result.speakers) > 1:
+        print(f"  📺 Generated {output_format.upper()} subtitles with {len(result.speakers)} speaker labels")
+    elif output_format == 'json' and include_speaker_stats:
+        print(f"  📊 JSON output includes detailed speaker statistics and conversation analysis")
+    elif output_format == 'markdown' and include_speaker_stats:
+        print(f"  📝 Markdown output includes enhanced speaker analysis and conversation flow")
 
 
 def main():
@@ -151,6 +176,9 @@ def main():
                 if config.word_timestamps:
                     print("Word timestamps: Enabled")
         
+        # Set global progress settings
+        set_global_quiet(args.quiet)
+        
         # Initialize router
         router = TranscriptionRouter(config)
         
@@ -181,7 +209,9 @@ def main():
             output_path=output_path,
             output_format=config.output_format,
             include_timestamps=config.word_timestamps or config.output.include_word_timestamps,
-            include_confidence=config.output.include_confidence_scores
+            include_confidence=config.output.include_confidence_scores,
+            include_word_timestamps=config.word_timestamps,
+            include_speaker_stats=True  # Always include speaker stats unless specifically disabled
         )
         
         # Summary

@@ -3,6 +3,13 @@ from pathlib import Path
 from typing import Dict, List, Optional
 import torch
 from huggingface_hub import hf_hub_download, login
+import sys
+
+# Add parent directory to path for imports
+parent_dir = Path(__file__).parent.parent
+sys.path.insert(0, str(parent_dir))
+
+from utils.progress import create_download_progress_callback, progress_context, should_show_progress
 
 
 class ModelManager:
@@ -117,7 +124,7 @@ class ModelManager:
         if self.is_model_cached(model_name, model_type):
             return True
         
-        print(f"Downloading {model_type} model: {model_name}")
+        disable_progress = not should_show_progress()
         
         try:
             if model_type == 'alignment':
@@ -126,22 +133,30 @@ class ModelManager:
                 cache_dir = self.models_dir / 'alignment' / model_name
                 cache_dir.mkdir(parents=True, exist_ok=True)
                 
-                # Download model files
-                hf_hub_download(
-                    repo_id=model_id,
-                    filename="pytorch_model.bin",
-                    cache_dir=str(cache_dir)
-                )
+                with progress_context(f"Downloading alignment model ({model_name})", disable=disable_progress) as spinner:
+                    # Download model files
+                    hf_hub_download(
+                        repo_id=model_id,
+                        filename="pytorch_model.bin",
+                        cache_dir=str(cache_dir)
+                    )
+                    spinner.finish(f"Alignment model {model_name} downloaded")
                 
             elif model_type == 'diarization':
                 # Diarization models require pyannote.audio and special handling
-                print("Diarization models will be downloaded automatically by pyannote.audio")
+                if not disable_progress:
+                    print("Diarization models will be downloaded automatically by pyannote.audio")
                 
-            # WhisperX models are handled by the library itself
+            else:
+                # WhisperX models are handled by the library itself
+                if not disable_progress:
+                    print(f"WhisperX will download model {model_name} automatically")
+                
             return True
             
         except Exception as e:
-            print(f"Error downloading {model_type} model {model_name}: {e}")
+            if not disable_progress:
+                print(f"Error downloading {model_type} model {model_name}: {e}")
             return False
     
     def get_device_info(self) -> Dict[str, str]:
