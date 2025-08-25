@@ -55,6 +55,12 @@ For diarization features:
 export HUGGINGFACE_TOKEN="your-hf-token"
 ```
 
+**Hugging Face Setup**:
+1. Create a **READ** token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
+2. Accept these model licenses:
+   - [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0)
+   - [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
+
 ## 📖 Usage
 
 ### Basic Transcription (OpenAI API)
