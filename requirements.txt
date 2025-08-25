@@ -1,0 +1,16 @@
+openai>=1.0.0
+python-dotenv
+pydub
+
+# WhisperX and dependencies
+whisperx>=3.1.1
+torch>=2.0.0
+torchaudio>=2.0.0
+pyannote.audio>=3.1.0
+faster-whisper>=0.10.0
+
+# Progress indicators
+tqdm>=4.65.0
+
+# Configuration management
+pyyaml>=6.0
