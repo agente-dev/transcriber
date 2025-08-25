@@ -35,6 +35,7 @@ from engines.base import (
     ValidationResult, EngineCapabilities
 )
 from config.models import ModelManager
+from diarization.pipeline import DiarizationPipeline
 
 
 class WhisperXEngine(TranscriptionEngine):
@@ -86,6 +87,7 @@ class WhisperXEngine(TranscriptionEngine):
         self.whisper_model = None
         self.alignment_model = None
         self.diarization_pipeline = None
+        self.enhanced_diarization_pipeline = None
         
         print(f"✓ WhisperX engine initialized (device: {self.device})")
     
@@ -174,26 +176,47 @@ class WhisperXEngine(TranscriptionEngine):
             return None
     
     def _load_diarization_pipeline(self):
-        """Load speaker diarization pipeline."""
+        """Load enhanced speaker diarization pipeline."""
         if not self.diarization_config.enabled:
             return None
         
-        if self.diarization_pipeline is not None:
-            return self.diarization_pipeline
+        if self.enhanced_diarization_pipeline is not None:
+            return self.enhanced_diarization_pipeline
         
         try:
-            print("Loading speaker diarization pipeline...")
-            self.diarization_pipeline = whisperx.DiarizationPipeline(
-                use_auth_token=self.model_manager.hf_token,
+            print("Loading enhanced speaker diarization pipeline...")
+            
+            # Create configuration for diarization pipeline
+            diarization_config = {
+                'cache_dir': str(self.model_manager.cache_dir),
+                'device': self.device
+            }
+            
+            self.enhanced_diarization_pipeline = DiarizationPipeline(
+                config=diarization_config,
+                hf_token=self.model_manager.hf_token,
                 device=self.device
             )
-            print("✓ Diarization pipeline loaded")
-            return self.diarization_pipeline
+            
+            print("✓ Enhanced diarization pipeline loaded")
+            return self.enhanced_diarization_pipeline
             
         except Exception as e:
-            print(f"Warning: Could not load diarization pipeline: {e}")
-            print("Speaker diarization will not be available")
-            return None
+            print(f"Warning: Could not load enhanced diarization pipeline: {e}")
+            print("Attempting fallback to basic WhisperX diarization...")
+            
+            # Fallback to basic WhisperX diarization
+            try:
+                self.diarization_pipeline = whisperx.DiarizationPipeline(
+                    use_auth_token=self.model_manager.hf_token,
+                    device=self.device
+                )
+                print("✓ Basic diarization pipeline loaded")
+                return self.diarization_pipeline
+            except Exception as fallback_error:
+                print(f"Warning: Fallback diarization also failed: {fallback_error}")
+                print("Speaker diarization will not be available")
+                return None
     
     def transcribe(self, audio_path: str) -> TranscriptionResult:
         """Transcribe audio file with WhisperX."""
@@ -242,19 +265,67 @@ class WhisperXEngine(TranscriptionEngine):
             if self.diarization_config.enabled:
                 diarization_pipeline = self._load_diarization_pipeline()
                 if diarization_pipeline is not None:
-                    print("Performing speaker diarization...")
                     
-                    diarize_segments = diarization_pipeline(
-                        audio,
-                        min_speakers=self.diarization_config.min_speakers,
-                        max_speakers=self.diarization_config.max_speakers
-                    )
+                    # Use enhanced diarization pipeline if available
+                    if isinstance(diarization_pipeline, DiarizationPipeline):
+                        print("Performing enhanced speaker diarization...")
+                        
+                        # Run enhanced diarization
+                        diarization_result = diarization_pipeline.diarize_audio(
+                            audio_path,
+                            min_speakers=self.diarization_config.min_speakers,
+                            max_speakers=self.diarization_config.max_speakers
+                        )
+                        
+                        # Apply to segments
+                        result["segments"] = diarization_pipeline.apply_diarization_to_segments(
+                            diarization_result, result["segments"]
+                        )
+                        
+                        # Apply to words if available
+                        if 'words' in result and result['words']:
+                            all_words = []
+                            for segment in result["segments"]:
+                                if 'words' in segment:
+                                    segment_words = diarization_pipeline.apply_word_level_diarization(
+                                        diarization_result, segment['words']
+                                    )
+                                    segment['words'] = segment_words
+                                    all_words.extend(segment_words)
+                            result['words'] = all_words
+                        
+                        # Get enhanced speaker statistics
+                        total_duration = max([seg['end'] for seg in result["segments"]]) if result["segments"] else 0.0
+                        speaker_stats = diarization_pipeline.get_enhanced_speaker_statistics(
+                            diarization_result, result["segments"], total_duration
+                        )
+                        speakers_list = self._convert_speaker_stats(speaker_stats)
+                        
+                        # Validate diarization quality
+                        validation = diarization_pipeline.validate_diarization_quality(
+                            diarization_result,
+                            min_speakers=self.diarization_config.min_speakers,
+                            max_speakers=self.diarization_config.max_speakers
+                        )
+                        
+                        for warning in validation.get('warnings', []):
+                            print(f"Diarization warning: {warning}")
                     
-                    # Apply speaker labels to segments
-                    result = whisperx.assign_word_speakers(diarize_segments, result)
-                    
-                    # Extract speaker information
-                    speakers_list = self._extract_speaker_info(result["segments"])
+                    else:
+                        # Fallback to basic WhisperX diarization
+                        print("Using basic WhisperX diarization...")
+                        
+                        diarize_segments = diarization_pipeline(
+                            audio,
+                            min_speakers=self.diarization_config.min_speakers,
+                            max_speakers=self.diarization_config.max_speakers
+                        )
+                        
+                        # Apply speaker labels to segments
+                        result = whisperx.assign_word_speakers(diarize_segments, result)
+                        
+                        # Extract speaker information
+                        speakers_list = self._extract_speaker_info(result["segments"])
             
             # Convert to our format
             return self._convert_result(result, language, Path(audio_path).name, speakers_list)
@@ -295,6 +366,22 @@ class WhisperXEngine(TranscriptionEngine):
             ))
         
         return sorted(speakers, key=lambda x: x.total_duration, reverse=True)
+    
+    def _convert_speaker_stats(self, speaker_stats: List[Dict]) -> List[Speaker]:
+        """Convert enhanced diarization statistics to Speaker objects."""
+        speakers = []
+        
+        for stats in speaker_stats:
+            speaker = Speaker(
+                id=stats['id'],
+                label=stats['label'],
+                segments=[],  # Segment indices not available in this format
+                total_duration=stats['total_duration'],
+                percentage=stats['percentage']
+            )
+            speakers.append(speaker)
+        
+        return speakers
     
     def _convert_result(self, result: Dict, language: str, filename: str, speakers: Optional[List[Speaker]]) -> TranscriptionResult:
         """Convert WhisperX result to our standard format."""

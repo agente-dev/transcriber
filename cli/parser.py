@@ -188,9 +188,12 @@ def args_to_config(args: argparse.Namespace) -> Dict[str, Any]:
     config_dict = {}
     
     # Engine selection
-    if args.local:
+    if args.local or args.diarize or args.word_timestamps:
+        # Force WhisperX for local processing, diarization, or word timestamps
         config_dict['engine'] = 'whisperx'
         config_dict['local'] = True
+        if args.engine == 'openai' and (args.diarize or args.word_timestamps):
+            print("Note: Switching to WhisperX engine for diarization/word-timestamps support")
     else:
         config_dict['engine'] = args.engine
     
