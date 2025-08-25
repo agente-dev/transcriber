@@ -36,6 +36,7 @@ from engines.base import (
 )
 from config.models import ModelManager
 from diarization.pipeline import DiarizationPipeline
+from alignment.word_aligner import WordAligner, AlignmentConfig
 
 
 class WhisperXEngine(TranscriptionEngine):
@@ -88,6 +89,7 @@ class WhisperXEngine(TranscriptionEngine):
         self.alignment_model = None
         self.diarization_pipeline = None
         self.enhanced_diarization_pipeline = None
+        self.word_aligner = None
         
         print(f"✓ WhisperX engine initialized (device: {self.device})")
     
@@ -153,8 +155,44 @@ class WhisperXEngine(TranscriptionEngine):
             else:
                 raise RuntimeError(f"Failed to load WhisperX model: {e}")
     
+    def _load_word_aligner(self):
+        """Load enhanced word aligner."""
+        if not self.alignment_config.enabled:
+            return None
+        
+        if self.word_aligner is not None:
+            return self.word_aligner
+        
+        try:
+            print("Loading enhanced word aligner...")
+            
+            # Create alignment configuration from settings
+            alignment_config = AlignmentConfig(
+                enabled=self.alignment_config.enabled,
+                return_char_alignments=getattr(self.alignment_config, 'return_char_alignments', False),
+                interpolate_method=getattr(self.alignment_config, 'interpolate_method', 'nearest'),
+                device=self.device,
+                extend_duration=2.0,
+                rtl_support=True,
+                min_word_confidence=getattr(self.alignment_config, 'min_word_confidence', 0.1),
+                alignment_window=0.02
+            )
+            
+            self.word_aligner = WordAligner(
+                config=alignment_config,
+                cache_dir=self.model_manager.cache_dir / "alignment"
+            )
+            
+            print("✓ Enhanced word aligner loaded")
+            return self.word_aligner
+            
+        except Exception as e:
+            print(f"Warning: Could not load enhanced word aligner: {e}")
+            print("Falling back to basic alignment...")
+            return None
+    
     def _load_alignment_model(self, language: str):
-        """Load alignment model for word-level timestamps."""
+        """Load basic alignment model for fallback (deprecated - use word_aligner)."""
         if not self.alignment_config.enabled:
             return None
         
@@ -162,12 +200,12 @@ class WhisperXEngine(TranscriptionEngine):
             return self.alignment_model
         
         try:
-            print(f"Loading alignment model for language: {language}")
+            print(f"Loading basic alignment model for language: {language}")
             self.alignment_model, self.alignment_metadata = whisperx.load_align_model(
                 language_code=language,
                 device=self.device
             )
-            print("✓ Alignment model loaded")
+            print("✓ Basic alignment model loaded")
             return self.alignment_model
             
         except Exception as e:
@@ -248,17 +286,42 @@ class WhisperXEngine(TranscriptionEngine):
             
             # Word-level alignment
             if self.alignment_config.enabled:
-                alignment_model = self._load_alignment_model(language)
-                if alignment_model is not None:
-                    print("Aligning words...")
-                    result = whisperx.align(
-                        result["segments"], 
-                        self.alignment_model, 
-                        self.alignment_metadata, 
-                        audio, 
-                        self.device, 
-                        return_char_alignments=False
+                word_aligner = self._load_word_aligner()
+                if word_aligner is not None:
+                    print("Aligning words with enhanced aligner...")
+                    
+                    # Use enhanced word aligner
+                    result["segments"] = word_aligner.align_segments(
+                        result["segments"],
+                        audio,
+                        language
                     )
+                    
+                    # Validate alignment quality
+                    validation = word_aligner.validate_alignment_quality(
+                        result["segments"],
+                        len(audio) / 16000  # Approximate duration
+                    )
+                    
+                    if validation['warnings']:
+                        for warning in validation['warnings']:
+                            print(f"Alignment warning: {warning}")
+                    
+                    print(f"✓ Word alignment completed ({validation['coverage_percentage']:.1f}% coverage)")
+                    
+                else:
+                    # Fallback to basic alignment
+                    alignment_model = self._load_alignment_model(language)
+                    if alignment_model is not None:
+                        print("Using basic word alignment...")
+                        result = whisperx.align(
+                            result["segments"], 
+                            self.alignment_model, 
+                            self.alignment_metadata, 
+                            audio, 
+                            self.device, 
+                            return_char_alignments=False
+                        )
             
             # Speaker diarization
             speakers_list = None
@@ -282,8 +345,23 @@ class WhisperXEngine(TranscriptionEngine):
                             diarization_result, result["segments"]
                         )
                         
-                        # Apply to words if available
-                        if 'words' in result and result['words']:
+                        # Apply to words if available using enhanced word aligner
+                        if self.word_aligner is not None:
+                            print("Mapping words to speakers with enhanced alignment...")
+                            result["segments"] = self.word_aligner.align_words_to_speakers(
+                                result["segments"], 
+                                diarization_result
+                            )
+                            
+                            # Update global words list
+                            all_words = []
+                            for segment in result["segments"]:
+                                if 'words' in segment:
+                                    all_words.extend(segment['words'])
+                            result['words'] = all_words
+                            
+                        elif 'words' in result and result['words']:
+                            # Fallback to basic word-level diarization
                             all_words = []
                             for segment in result["segments"]:
                                 if 'words' in segment:

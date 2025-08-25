@@ -116,6 +116,26 @@ Examples:
     )
     
     parser.add_argument(
+        '--alignment-method',
+        choices=['nearest', 'linear'],
+        default='nearest',
+        help='Word alignment interpolation method (default: nearest)'
+    )
+    
+    parser.add_argument(
+        '--min-word-confidence',
+        type=float,
+        default=0.1,
+        help='Minimum confidence threshold for word alignment (default: 0.1)'
+    )
+    
+    parser.add_argument(
+        '--char-alignments',
+        action='store_true',
+        help='Include character-level alignments (advanced, slower)'
+    )
+    
+    parser.add_argument(
         '--no-vad',
         action='store_true',
         help='Disable voice activity detection (WhisperX only)'
@@ -229,8 +249,22 @@ def args_to_config(args: argparse.Namespace) -> Dict[str, Any]:
         config_dict['diarization'] = diarization_config
     
     # Alignment settings
+    alignment_config = {}
     if args.no_alignment:
-        config_dict['alignment'] = {'enabled': False}
+        alignment_config['enabled'] = False
+    elif args.word_timestamps:
+        alignment_config['enabled'] = True
+    
+    # Advanced alignment options
+    if hasattr(args, 'alignment_method') and args.alignment_method != 'nearest':
+        alignment_config['interpolate_method'] = args.alignment_method
+    if hasattr(args, 'min_word_confidence') and args.min_word_confidence != 0.1:
+        alignment_config['min_word_confidence'] = args.min_word_confidence
+    if hasattr(args, 'char_alignments') and args.char_alignments:
+        alignment_config['return_char_alignments'] = True
+    
+    if alignment_config:
+        config_dict['alignment'] = alignment_config
     
     # VAD settings
     if args.no_vad:
@@ -239,7 +273,11 @@ def args_to_config(args: argparse.Namespace) -> Dict[str, Any]:
     # Word timestamps
     if args.word_timestamps:
         config_dict['word_timestamps'] = True
-        config_dict['alignment'] = {'enabled': True}
+        # Ensure alignment is enabled for word timestamps
+        if 'alignment' not in config_dict:
+            config_dict['alignment'] = {'enabled': True}
+        else:
+            config_dict['alignment']['enabled'] = True
     
     # Output settings
     config_dict['output_format'] = args.output_format
